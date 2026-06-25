@@ -26,7 +26,7 @@ func NewApp(args []string, input io.Reader, output io.Writer, now func() time.Ti
 	}
 }
 
-func (app App) Run() error {
+func (app App) Run() (runErr error) {
 	config, err := LoadConfig(".env")
 	if err != nil {
 		return err
@@ -35,6 +35,16 @@ func (app App) Run() error {
 	if len(app.args) > 0 {
 		config.RepositoryLink = app.args[0]
 	}
+
+	sourceBranch, err := app.askSourceBranch()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := app.git.Checkout(sourceBranch); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 
 	lastTag, err := app.git.LastTag()
 	if err != nil {
@@ -56,7 +66,7 @@ func (app App) Run() error {
 		return err
 	}
 
-	if err := app.git.CreateBranch(branchName); err != nil {
+	if err := app.git.CreateBranch(branchName, sourceBranch); err != nil {
 		return err
 	}
 
@@ -75,7 +85,7 @@ func (app App) Run() error {
 
 	app.printColored(fmt.Sprintf("Следующая версия приложения: %s \n", newVersion.String()), green)
 
-	commitLines, err := app.git.ChangeLines(version.String(), masterCommit)
+	commitLines, err := app.git.ChangeLines(version.String(), sourceBranch, masterCommit)
 	if err != nil {
 		return err
 	}
@@ -114,7 +124,92 @@ func (app App) Run() error {
 		return err
 	}
 
-	return app.git.DeleteBranch(branchName)
+	return app.git.DeleteBranch(branchName, sourceBranch)
+}
+
+func (app App) askSourceBranch() (string, error) {
+	currentBranch, err := app.git.CurrentBranch()
+	if err != nil {
+		currentBranch = ""
+	}
+
+	releaseBranches, err := app.git.ReleaseBranches(10)
+	if err != nil {
+		return "", err
+	}
+
+	app.print("Из какой ветки собрать changelog?\n\n")
+
+	options := map[string]string{"1": "develop"}
+	optionNumber := 1
+	app.print("1 - develop [по умолчанию]\n")
+
+	for _, branch := range releaseBranches {
+		if branch == "develop" {
+			continue
+		}
+
+		optionNumber++
+		key := fmt.Sprint(optionNumber)
+		options[key] = branch
+		app.print(fmt.Sprintf("%s - %s\n", key, branch))
+	}
+
+	if isAssignToChangelogBranch(currentBranch) {
+		app.printColored(fmt.Sprintf("Текущая ветка %s служебная, она не будет предложена как источник changelog.\n", currentBranch), yellow)
+	} else if currentBranch != "develop" && !branchInOptions(currentBranch, options) {
+		optionNumber++
+		key := fmt.Sprint(optionNumber)
+		options[key] = currentBranch
+		app.print(fmt.Sprintf("%s - текущая ветка: %s\n", key, currentBranch))
+	}
+
+	app.print("0 - ввести вручную\n\n")
+	app.print("Выбор [1]: ")
+
+	input, err := app.readLine()
+	if err != nil {
+		return "", err
+	}
+	if input == "" {
+		return "develop", nil
+	}
+	if input == "0" {
+		return app.askManualSourceBranch()
+	}
+
+	sourceBranch, ok := options[input]
+	if !ok {
+		return "", fmt.Errorf("неверный выбор ветки-источника")
+	}
+
+	return app.prepareSourceBranch(sourceBranch)
+}
+
+func (app App) askManualSourceBranch() (string, error) {
+	app.print("Введите ветку: ")
+
+	branch, err := app.readLine()
+	if err != nil {
+		return "", err
+	}
+
+	if branch == "" {
+		return "", fmt.Errorf("ветка-источник не указана")
+	}
+	if isAssignToChangelogBranch(branch) {
+		return "", fmt.Errorf("ветка %s служебная и не может быть источником changelog", branch)
+	}
+
+	return app.prepareSourceBranch(branch)
+}
+
+func (app App) prepareSourceBranch(branch string) (string, error) {
+	if !strings.HasPrefix(branch, "origin/") {
+		return branch, nil
+	}
+
+	return app.git.CheckoutRemoteBranch(branch)
 }
 
 func (app App) askBranchName(prefix string) (string, error) {
@@ -167,6 +262,16 @@ func (app App) print(message string) {
 
 func (app App) printColored(message string, color string) {
 	fmt.Fprintf(app.output, "\033[01;%sm%s\033[0m", color, message)
+}
+
+func branchInOptions(branch string, options map[string]string) bool {
+	for _, optionBranch := range options {
+		if optionBranch == branch {
+			return true
+		}
+	}
+
+	return false
 }
 
 const (
