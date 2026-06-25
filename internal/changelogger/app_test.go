@@ -215,6 +215,117 @@ func TestRunReturnsToSourceBranchAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestRunKeepsChangelogBranchWhenCommitDeclinedAfterChangelogConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/.env", []byte("CHANGELOG_PATH=./CHANGELOG.md\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/CHANGELOG.md", []byte("# История изменений\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	runner := newRecordingRunner(map[string]runnerResponse{
+		commandKey("git", "rev-parse", "--abbrev-ref", "HEAD"): {
+			output: "feature/IU123456-W000001-assign-to-changelog\n",
+		},
+		commandKey("git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"): {
+			output: "release/1.25.0\n",
+		},
+		commandKey("git", "rev-list", "--tags", "--max-count=1"): {
+			output: "tagcommit\n",
+		},
+		commandKey("git", "describe", "--tags", "tagcommit"): {
+			output: "1.2.3\n",
+		},
+		commandKey("git", "rev-parse", "origin/master"): {
+			output: "mastercommit\n",
+		},
+		commandKey("git", "branch", "--list", "feature/IU123456-W000001-assign-to-changelog"): {},
+		commandKey("git", "checkout", "develop"):                                              {},
+		commandKey("git", "checkout", "-b", "feature/IU123456-W000001-assign-to-changelog"):   {},
+		commandKey("git", "log", "--pretty=format:%h|%an|%s|%cs", "--no-merges", "1.2.3..develop"): {
+			output: "abc|Me|[PROJ-IU123456-W000001] fix: исправлен расчет|2026-06-25\n",
+		},
+		commandKey("git", "cherry", "-v", "mastercommit", "1.2.3"): {},
+	})
+	input := strings.NewReader("\nIU123456-W000001\n1\ny\nn\n")
+	var output strings.Builder
+	app := NewApp(nil, input, &output, func() time.Time {
+		return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	}, runner)
+
+	if err := app.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if runner.called(commandKey("git", "add", "./CHANGELOG.md")) {
+		t.Fatalf("commit should not be started when commit is declined, calls: %v", runner.calls)
+	}
+	if runner.calledAfter(commandKey("git", "checkout", "-b", "feature/IU123456-W000001-assign-to-changelog"), commandKey("git", "checkout", "develop")) {
+		t.Fatalf("source branch should not be restored after changelog confirmation, calls: %v", runner.calls)
+	}
+	assertContains(t, output.String(), "Коммит не создан")
+}
+
+func TestRunKeepsChangelogBranchWhenPushDeclined(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/.env", []byte("CHANGELOG_PATH=./CHANGELOG.md\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/CHANGELOG.md", []byte("# История изменений\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	runner := newRecordingRunner(map[string]runnerResponse{
+		commandKey("git", "rev-parse", "--abbrev-ref", "HEAD"): {
+			output: "feature/IU123456-W000001-assign-to-changelog\n",
+		},
+		commandKey("git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"): {
+			output: "release/1.25.0\n",
+		},
+		commandKey("git", "rev-list", "--tags", "--max-count=1"): {
+			output: "tagcommit\n",
+		},
+		commandKey("git", "describe", "--tags", "tagcommit"): {
+			output: "1.2.3\n",
+		},
+		commandKey("git", "rev-parse", "origin/master"): {
+			output: "mastercommit\n",
+		},
+		commandKey("git", "branch", "--list", "feature/IU123456-W000001-assign-to-changelog"): {},
+		commandKey("git", "checkout", "develop"):                                              {},
+		commandKey("git", "checkout", "-b", "feature/IU123456-W000001-assign-to-changelog"):   {},
+		commandKey("git", "log", "--pretty=format:%h|%an|%s|%cs", "--no-merges", "1.2.3..develop"): {
+			output: "abc|Me|[PROJ-IU123456-W000001] fix: исправлен расчет|2026-06-25\n",
+		},
+		commandKey("git", "cherry", "-v", "mastercommit", "1.2.3"):            {},
+		commandKey("git", "add", "./CHANGELOG.md"):                            {},
+		commandKey("git", "commit", "-m", "wip: Отредактирован CHANGELOG.md"): {},
+	})
+	input := strings.NewReader("\nIU123456-W000001\n1\ny\ny\nn\n")
+	var output strings.Builder
+	app := NewApp(nil, input, &output, func() time.Time {
+		return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	}, runner)
+
+	if err := app.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if runner.called(commandKey("git", "push", "origin", "feature/IU123456-W000001-assign-to-changelog")) {
+		t.Fatalf("branch should not be pushed when push is declined, calls: %v", runner.calls)
+	}
+	if runner.called(commandKey("git", "branch", "-D", "feature/IU123456-W000001-assign-to-changelog")) {
+		t.Fatalf("changelog branch should not be deleted when push is declined, calls: %v", runner.calls)
+	}
+	if runner.calledAfter(commandKey("git", "checkout", "-b", "feature/IU123456-W000001-assign-to-changelog"), commandKey("git", "checkout", "develop")) {
+		t.Fatalf("source branch should not be restored after changelog confirmation, calls: %v", runner.calls)
+	}
+	assertContains(t, output.String(), "Push не выполнен")
+}
+
 type runnerResponse struct {
 	output string
 	err    error

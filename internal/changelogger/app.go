@@ -27,6 +27,8 @@ func NewApp(args []string, input io.Reader, output io.Writer, now func() time.Ti
 }
 
 func (app App) Run() (runErr error) {
+	restoreSourceBranch := true
+
 	config, err := LoadConfig(".env")
 	if err != nil {
 		return err
@@ -41,6 +43,10 @@ func (app App) Run() (runErr error) {
 		return err
 	}
 	defer func() {
+		if !restoreSourceBranch {
+			return
+		}
+
 		if err := app.git.Checkout(sourceBranch); err != nil && runErr == nil {
 			runErr = err
 		}
@@ -101,14 +107,20 @@ func (app App) Run() (runErr error) {
 	if err := app.askConfirmation("Все верно?"); err != nil {
 		return err
 	}
+	restoreSourceBranch = false
 
 	if err := changelog.Write(config.ChangelogPath, newVersion.String(), answerBody); err != nil {
 		return err
 	}
 	app.printColored("Файл CHANGELOG.md успешно отредактирован:  \n", green)
 
-	if err := app.askConfirmation("Создать коммит?"); err != nil {
+	createCommit, err := app.askYesNo("Создать коммит?")
+	if err != nil {
 		return err
+	}
+	if !createCommit {
+		app.printColored("Ветка оставлена для ручных правок. Коммит не создан.\n", yellow)
+		return nil
 	}
 
 	if err := app.git.Commit(config.ChangelogPath); err != nil {
@@ -116,8 +128,13 @@ func (app App) Run() (runErr error) {
 	}
 	app.printColored("Коммит успешно создан!  \n", green)
 
-	if err := app.askConfirmation("Пушить ветку " + branchName + "?"); err != nil {
+	pushBranch, err := app.askYesNo("Пушить ветку " + branchName + "?")
+	if err != nil {
 		return err
+	}
+	if !pushBranch {
+		app.printColored("Ветка оставлена для ручных правок. Push не выполнен.\n", yellow)
+		return nil
 	}
 
 	if err := app.git.Push(branchName); err != nil {
@@ -244,6 +261,24 @@ func (app App) askConfirmation(question string) error {
 		return nil
 	default:
 		return fmt.Errorf("выполнение команды отменено")
+	}
+}
+
+func (app App) askYesNo(question string) (bool, error) {
+	app.print(question + " (y/n): ")
+
+	answer, err := app.readLine()
+	if err != nil {
+		return false, err
+	}
+
+	switch strings.ToLower(answer) {
+	case "y", "yes":
+		return true, nil
+	case "n", "no", "н", "нет":
+		return false, nil
+	default:
+		return false, fmt.Errorf("неверный ответ")
 	}
 }
 
